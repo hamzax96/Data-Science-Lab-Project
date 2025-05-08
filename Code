@@ -1,0 +1,117 @@
+
+        # Step 1: Load data
+        df = pd.read_csv(file_path, header=None, names=['id', 'brand', 'sentiment', 'text'])
+        df = df[df['sentiment'] != 'Irrelevant']
+        
+        # Step 2: Preprocess text
+        nltk.download('wordnet', quiet=True)
+        nltk.download('stopwords', quiet=True)
+        lemmatizer = WordNetLemmatizer()
+        stop_words = set(stopwords.words('english'))
+        
+        def preprocess_text(text):
+            text = str(text).lower()
+            text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
+            text = re.sub(r'\@\w+|\#', '', text)
+            text = re.sub(r'[^a-zA-Z\s]', '', text)
+            tokens = text.split()
+            tokens = [lemmatizer.lemmatize(word) for word in tokens if word not in stop_words]
+            return ' '.join(tokens)
+        
+        df['processed_text'] = df['text'].apply(preprocess_text)
+        
+        # Step 3: Vectorize text
+        tfidf_vectorizer = TfidfVectorizer(max_features=5000)
+        X = tfidf_vectorizer.fit_transform(df['processed_text'])
+        y = LabelEncoder().fit_transform(df['sentiment'])
+        
+        # Step 4: Model validation
+        models = {
+            'Naive Bayes': MultinomialNB(),
+            'Logistic Regression': LogisticRegression(max_iter=1000),
+            'SVM': SVC(kernel='linear')
+        }
+        
+        print("\nModel Validation Results:")
+        for name, model in models.items():
+            try:
+                scores = cross_val_score(model, X, y, cv=5, scoring='accuracy')
+                print(f"{name} - Mean Accuracy: {scores.mean():.4f}, Std: {scores.std():.4f}")
+            except Exception as e:
+                print(f"Error with {name}: {str(e)}")
+        
+        # Step 5: Store in database
+        conn = sqlite3.connect('twitter_sentiment.db')
+        cursor = conn.cursor()
+        
+        # Create fresh table (remove this in production to keep historical data)
+        cursor.execute('DROP TABLE IF EXISTS tweets')
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tweets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            original_text TEXT,
+            processed_text TEXT,
+            sentiment TEXT,
+            brand TEXT,
+            date_added TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        
+        # Insert data in batches
+        batch_size = 1000
+        for i in range(0, len(df), batch_size):
+            batch = df.iloc[i:i+batch_size]
+            cursor.executemany('''
+            INSERT INTO tweets (original_text, processed_text, sentiment, brand)
+            VALUES (?, ?, ?, ?)
+            ''', batch[['text', 'processed_text', 'sentiment', 'brand']].values.tolist())
+        
+        conn.commit()
+        print(f"\nSuccessfully stored {len(df)} tweets in database")
+        
+        # Step 6: Analyze trends
+        def get_sentiment_trends(brand=None):
+            query = '''
+            SELECT sentiment, COUNT(*) as count
+            FROM tweets
+            '''
+            params = []
+            
+            if brand:
+                query += ' WHERE brand = ?'
+                params.append(brand)
+            
+            query += ' GROUP BY sentiment'
+            
+            cursor.execute(query, params)
+            results = cursor.fetchall()
+            
+            trends_df = pd.DataFrame(results, columns=['sentiment', 'count'])
+            
+            plt.figure(figsize=(10, 6))
+            sns.barplot(x='sentiment', y='count', data=trends_df)
+            title = f'Sentiment Distribution{f" for {brand}" if brand else ""}'
+            plt.title(title)
+            plt.show()
+            
+            return trends_df
+        
+        print("\nSample Sentiment Analysis:")
+        trends = get_sentiment_trends(brand='Microsoft')
+        print(trends)
+        
+    except Exception as e:
+        print(f"Pipeline error: {str(e)}")
+        return None, None
+    finally:
+        # Step 7: Close connection if it exists
+        if conn is not None:
+            conn.close()
+            print("Database connection closed")
+    
+    return df, trends
+
+# Run the pipeline
+df, trends = run_sentiment_analysis_pipeline('twitter_validation.csv')
+if df is not None:
+    print("\nPipeline executed successfully!")
